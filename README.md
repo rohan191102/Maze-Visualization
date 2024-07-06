@@ -1,0 +1,1 @@
+The data for drawing the maze comes from ultrasonic sensors and motor from the robot that moves through the maze. The maze algorithm tracks the path it took through the maze and always tries to find new direction based on the history.
