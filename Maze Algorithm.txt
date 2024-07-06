@@ -1,0 +1,578 @@
+////////////////////////////////////////////////
+/////////////////////wifi///////////////////////////
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+////////////////////////////////////////////////
+#include <SPI.h>
+
+// GPIO pins for SPI communication
+const int CS_PIN1 = 4;  // Motor pin
+const int CS_PIN2 = 5;  // Ultrasonic sensor
+const int CS_PIN3 = 6;  // ir
+
+#define IREQ_PIN 38 //treasure
+
+volatile bool treasureDetected = false; // Flag to indicate treasure detection
+
+
+#define SPIN_360 7
+#define MAZE_SIZE 100
+long randNumber;
+// Movement definitions
+#define MOVE_LEFT 1
+#define MOVE_RIGHT 2
+#define MOVE_STRAIGHT 3
+#define MOVE_BACK 4 
+#define MOVE_STOP 5
+#define MOVE_180 6 // in stm8 has auto 1 step go forward
+#define MOVE_BACK_LITTLE 7
+#define MOVE_LEFT_LITTLE 8
+#define MOVE_RIGHT_LITTLE 9
+
+#define THRESHOLD 30
+#define FRONT_SENSOR 1
+#define LEFT_SENSOR 2
+#define RIGHT_SENSOR 3
+
+uint8_t receivedData1;  // Data from ultrasonic sensor
+uint8_t motorCommand;   // Command for the motor
+int counter = 0;
+struct Position {
+    int x, y;
+    int orientation;
+};
+
+struct walls {
+  uint8_t blockOrientation;
+    bool leftWall;
+    bool rightWall;
+    bool frontWall;
+    bool backWall;
+}; 
+
+struct Distances {
+    int front;
+    int left;
+    int right;
+};
+
+struct updateWallsAndCommand{
+  int command;
+  walls newWalls;
+};
+
+void fixOrientation(Distances currentDistance); // Function declaration
+
+Position currentPos;
+
+bool visited[MAZE_SIZE][MAZE_SIZE] = {{false}};
+walls possibleDirections[MAZE_SIZE][MAZE_SIZE];
+
+
+bool backWallFlag;
+
+
+
+////////////////////////////////////////////////////////
+//////////////////wifi////////////////////////
+
+
+// const char *ssid = "iPhone";
+// const char *password = "12345678";
+
+const char *ssid = "Redmi K40";
+const char *password = "1qaz2wsx";
+
+const char *serverIP = "192.168.59.34";
+const int port = 51973;
+
+uint8_t appendMotor;
+WiFiClient client;
+String randomInt;
+//////////////////////////////////////////
+
+
+void setup() {
+
+   
+    Serial.begin(19200);
+    backWallFlag = false;
+    currentPos.orientation = 0;
+    currentPos.x = MAZE_SIZE/2;
+    currentPos.y = MAZE_SIZE/2;
+    SPI.begin(36, 37, 35, 4); 
+    SPI.begin(36, 37, 35, 5);// Ultrasonic sensor
+    
+    pinMode(CS_PIN1, OUTPUT);
+    pinMode(CS_PIN2, OUTPUT);
+    pinMode(CS_PIN3, OUTPUT);
+    Serial.println("initial setup");
+    digitalWrite(CS_PIN1, HIGH);
+    digitalWrite(CS_PIN2, HIGH);
+    digitalWrite(CS_PIN3, HIGH);
+
+    pinMode(IREQ_PIN, INPUT_PULLDOWN);  // Set IREQ pin as input with a pull-down resistor
+    attachInterrupt(digitalPinToInterrupt(IREQ_PIN), treasureDetectedISR, RISING); // Attach interrupt
+
+    ////////////////////////////////////
+    ////////////// wifi////////////
+    //wifiSetup();
+    ////////////////////////////////////
+
+    delay(5000);
+}
+
+// Interrupt Service Routine (ISR)
+void treasureDetectedISR() {
+    treasureDetected = true;  // Set the flag when treasure is detected
+}
+
+
+
+
+void loop() {
+
+    if (treasureDetected) {
+        // Stop all movements or other necessary actions
+        digitalWrite(CS_PIN1, LOW);
+        SPI.transfer(MOVE_STOP);  // Assuming MOVE_STOP is defined as the stop command
+        delay(300);  // Wait for the command to take effect
+        digitalWrite(CS_PIN1, HIGH);
+        Serial.println("Treasure detected, stopping...");
+        while (1);  // Stop the program (or handle it differently if needed)
+    }
+
+    
+    walls currentWalls;
+    
+    //update backwall, depends on have been there or not, later
+    if(!visited[currentPos.x][currentPos.y]){
+      currentWalls = requestData(); //get walls setup by sensor
+      visited[currentPos.x][currentPos.y] = true;
+      
+      }
+    else{
+      currentWalls = adjustWithOrientation(possibleDirections[currentPos.x][currentPos.y]); 
+      walls toFixDirection= requestData();
+      // if(!currentWalls.leftWall)  Serial.println()
+      }
+    
+    if(currentWalls.leftWall==true&&
+    currentWalls.rightWall==true&&
+    currentWalls.frontWall==true&&
+    currentWalls.backWall==true
+    )
+    while(1){
+      Serial.println("should stop");
+      delay(1000);
+    }
+    
+    
+
+    updateWallsAndCommand newStruct = processMovement(currentWalls);// algo
+    motorCommand = newStruct.command;
+    currentWalls = newStruct.newWalls;
+
+     Serial.print("BackWallFlag: ");
+     Serial.println(backWallFlag);
+   
+    /*if(motorCommand == MOVE_STRAIGHT)
+      currentWalls.frontWall = true;*/
+      
+    // else if(motorCommand == MOVE_BACK){
+    //   currentWalls.backWall = true;
+      
+    // }
+    possibleDirections[currentPos.x][currentPos.y] = currentWalls;
+
+
+    digitalWrite(CS_PIN1, LOW);
+    Serial.print("Motor Command Sent: ");
+    Serial.println(motorCommand);
+    SPI.transfer(motorCommand);
+    delay(300);
+    uint8_t motorResponse = SPI.transfer(0);
+    // Serial.print("Motor Response: ");
+    // Serial.println(motorResponse);
+
+    digitalWrite(CS_PIN1, HIGH);
+    
+    updateOrientation(motorCommand);
+
+    delay(2000);
+
+    ////////////////////////////////////////////////
+    //////////////////wifi//////////////////////////////
+    //wifiSend(currentWalls);
+    ////////////////////////////////////////////////
+
+    delay(2000);
+}
+
+walls adjustWithOrientation(walls DirectionBeforeAdjust){
+  walls afterAdjust;
+  afterAdjust.blockOrientation = currentPos.orientation;
+  if(currentPos.orientation == DirectionBeforeAdjust.blockOrientation){
+    return DirectionBeforeAdjust;
+
+  }
+  else{
+    if(abs(currentPos.orientation - DirectionBeforeAdjust.blockOrientation) == 2){
+        afterAdjust.leftWall = DirectionBeforeAdjust. rightWall;
+      afterAdjust.rightWall= DirectionBeforeAdjust. leftWall;
+      afterAdjust.frontWall= DirectionBeforeAdjust. backWall;
+      afterAdjust.backWall= DirectionBeforeAdjust. frontWall;
+    }
+      
+
+    else if(currentPos.orientation - DirectionBeforeAdjust.blockOrientation == 1 || currentPos.orientation - DirectionBeforeAdjust.blockOrientation == -3){
+          afterAdjust.leftWall = DirectionBeforeAdjust. frontWall;
+      afterAdjust.rightWall= DirectionBeforeAdjust. backWall;
+      afterAdjust.frontWall= DirectionBeforeAdjust. rightWall;
+      afterAdjust.backWall= DirectionBeforeAdjust. leftWall;
+      }
+      
+      else if(currentPos.orientation - DirectionBeforeAdjust.blockOrientation == -1 || currentPos.orientation - DirectionBeforeAdjust.blockOrientation == 3 ){
+          afterAdjust.leftWall = DirectionBeforeAdjust. backWall;
+      afterAdjust.rightWall= DirectionBeforeAdjust. frontWall;
+      afterAdjust.frontWall= DirectionBeforeAdjust. leftWall;
+      afterAdjust.backWall= DirectionBeforeAdjust. rightWall;
+      }
+  }
+  return afterAdjust;
+}
+
+walls requestData() {
+
+  digitalWrite(CS_PIN2, LOW);
+  
+  walls newWallMeasurement;
+  Distances currentDistance;
+  bool s1=false;
+  bool s2=false;
+  bool s3=false;
+
+   while (!s1 || !s2 || !s3){
+    uint8_t data;
+    if(!s1){
+      data = SPI.transfer(1);
+      Serial.println("Requesting data from sensor 1");
+      delay(300);
+      data = SPI.transfer(0);
+
+      if(data > THRESHOLD){
+        newWallMeasurement.frontWall = false;
+        }
+      else{
+        newWallMeasurement.frontWall = true;
+        }
+      s1 = true;
+      Serial.println("Sensor Front: " + String(data));
+      currentDistance.front = data;
+    }
+
+    else if(!s2){
+      Serial.println("Requesting data from sensor 2");
+      data = SPI.transfer(2);
+      delay(300);
+      data = SPI.transfer(0);
+
+      if(data > THRESHOLD){
+        newWallMeasurement.leftWall = false;
+        }
+      else{
+        newWallMeasurement.leftWall = true;
+        }
+      s2 = true;
+      Serial.println("Sensor Left: " + String(data));
+      currentDistance.left = data;
+    }
+
+    else if(!s3){
+      data = SPI.transfer(3);
+      Serial.println("Requesting data from sensor 3");
+      delay(300);
+      data = SPI.transfer(0);
+
+      if(data > THRESHOLD){
+        newWallMeasurement.rightWall = false;
+        }
+      else{
+        newWallMeasurement.rightWall = true;
+        }
+      s3 = true;
+      Serial.println("Sensor Right: " + String(data));
+      currentDistance.right = data;
+    }
+  }
+  digitalWrite(CS_PIN2, HIGH);
+  //we already update orientation so just use it
+  newWallMeasurement.blockOrientation = currentPos.orientation;
+  newWallMeasurement.backWall = false;
+  
+  fixOrientation(currentDistance);
+
+  return newWallMeasurement;
+
+}
+
+updateWallsAndCommand processMovement(walls wall) {
+  updateWallsAndCommand newStruct;
+  int wallCounter = 0;
+
+  if(backWallFlag){
+  wall.backWall = true;
+  //lock the back walls
+  }
+
+  if(wall.frontWall == false){
+    wallCounter++;
+  }
+  if(wall.leftWall == false){
+    wallCounter++;
+  }
+  if(wall.rightWall == false){
+    wallCounter++;
+  }
+
+  if(wall.backWall == false){
+    wallCounter++;
+  }
+  if(wallCounter >= 2){
+    backWallFlag = false;
+    }
+ 
+  // if(backWallFlag){
+  //   wall.backWall = true;
+  //   //lock the back walls
+  //   }
+    
+    newStruct.newWalls = wall;
+    
+    uint8_t newCommand;
+    Serial.print("currentPos: x,y : ");
+    Serial.print(currentPos.x);
+    Serial.print(" ; ");
+    Serial.println(currentPos.y);
+    Serial.println(currentPos.orientation);
+    if(wall.rightWall == false){ //there is no right wall, possible direction
+      newStruct.command = MOVE_RIGHT;
+      return newStruct;
+      }
+    else if(wall.frontWall == false){
+      newStruct.command = MOVE_STRAIGHT;
+      return newStruct;
+      }
+    else if(wall.leftWall == false){
+      newStruct.command = MOVE_LEFT;
+      return newStruct;
+      }
+    
+    else{
+      backWallFlag = true;
+      newStruct.command = MOVE_180;
+      return newStruct;
+      }
+}
+
+void updateOrientation(uint8_t commandUpdateOrientation)
+{
+  if(commandUpdateOrientation == MOVE_LEFT)
+  {
+    if(currentPos.orientation == 0)
+    {
+      currentPos.orientation = 3;
+    }
+    else{
+      currentPos.orientation--;
+    }
+  }
+  else if(commandUpdateOrientation == MOVE_RIGHT){
+    if(currentPos.orientation == 3)
+    {
+      currentPos.orientation = 0;
+    }
+    else{
+      currentPos.orientation++;
+    }
+  }
+  else if(commandUpdateOrientation == MOVE_180){
+      if(currentPos.orientation == 0)
+      {
+        currentPos.orientation = 2;
+      }
+      else if(currentPos.orientation == 1)
+      {
+        currentPos.orientation = 3;
+      }
+      else if(currentPos.orientation == 2)
+      {
+        currentPos.orientation = 0;
+      }
+      else if(currentPos.orientation == 3)
+      {
+        currentPos.orientation = 1;
+      }
+  }
+  currentPos = updateCoordinates(currentPos, commandUpdateOrientation);
+}
+
+Position updateCoordinates(Position position,int command){
+  if(command == MOVE_STRAIGHT || command == MOVE_RIGHT || command == MOVE_LEFT)
+  {
+        switch (position.orientation) {
+        case 0: position.y++; break;
+        case 1: position.x++; break;
+        case 2: position.y--; break;
+        case 3: position.x--; break;
+        default: break;
+    }
+  }
+  else if(command == MOVE_BACK)
+  {
+        switch (position.orientation) {
+        case 0: position.y--; break;
+        case 1: position.x--; break;
+        case 2: position.y++; break;
+        case 3: position.x++; break;
+        default: break;
+    }
+  }
+  // else if(command == MOVE_180){//since we have 1 step go forward in the stm8
+  //   switch (position.orientation) {
+  //       case 0: position.y++; break;
+  //       case 1: position.x++; break;
+  //       case 2: position.y--; break;
+  //       case 3: position.x--; break;
+  //       default: break;
+  // }
+   return position;
+// }
+}
+
+void fixOrientation(Distances currentDistance){
+  uint8_t leftDistance = currentDistance.left;
+  uint8_t rightDistance = currentDistance.right;
+  uint8_t frontDistance = currentDistance.front;
+  uint8_t motorCommandAdjust;
+  Serial.println("leftDistance" + String(leftDistance));
+  Serial.println("rightDistance" + String(rightDistance));
+  Serial.println("frontDistance" + String(frontDistance));
+
+
+  if(frontDistance <= 10){//too close to the wall
+    motorCommandAdjust = MOVE_BACK_LITTLE;
+
+    digitalWrite(CS_PIN1, LOW);
+    SPI.transfer(motorCommandAdjust);
+    delay(300);
+    uint8_t motorResponse = SPI.transfer(0);
+    Serial.print("Motor Command Sent: ");
+    Serial.println(motorCommandAdjust);
+    Serial.print("Motor Response: ");
+    Serial.println(motorResponse);
+  
+    digitalWrite(CS_PIN1, HIGH);
+    delay(2000);
+  }
+
+  if(leftDistance <= 8 /&& rightDistance > 15/){
+     motorCommandAdjust = MOVE_RIGHT_LITTLE;
+
+    digitalWrite(CS_PIN1, LOW);
+    SPI.transfer(motorCommandAdjust);
+    delay(300);
+    uint8_t motorResponse = SPI.transfer(0);
+    Serial.print("Motor Command Sent: ");
+    Serial.println(motorCommandAdjust);
+    Serial.print("Motor Response: ");
+    Serial.println(motorResponse);
+  
+    digitalWrite(CS_PIN1, HIGH);
+    delay(2000);
+  }
+
+  else if(rightDistance <= 8/* && leftDistance > 15*/){
+     motorCommandAdjust = MOVE_LEFT_LITTLE;
+
+    digitalWrite(CS_PIN1, LOW);
+    SPI.transfer(motorCommandAdjust);
+    delay(300);
+    uint8_t motorResponse = SPI.transfer(0);
+    Serial.print("Motor Command Sent: ");
+    Serial.println(motorCommandAdjust);
+    Serial.print("Motor Response: ");
+    Serial.println(motorResponse);
+  
+    digitalWrite(CS_PIN1, HIGH);
+    delay(2000);
+    }
+}
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////wifi things////////////////////////////////
+bool sendData(String message) {
+    if (client.connected()) {
+        client.println(message);
+        Serial.println("Wifi sent: " + String(message));
+        return true;
+    } else {
+        Serial.println("Connection lost");
+        return false;
+    }
+}
+
+
+void wifiSend(walls currentWalls){
+  Serial.println("wall front : " + String(currentWalls.frontWall));
+    Serial.println("wall left : " + String(currentWalls.leftWall));
+    Serial.println("wall right : " + String(currentWalls.rightWall));
+
+    if(motorCommand == MOVE_LEFT)
+    {
+      appendMotor = 3;
+    }
+    if(motorCommand == MOVE_RIGHT)
+    {
+      appendMotor = 1;
+    }
+    if(motorCommand == MOVE_STRAIGHT)
+    {
+      appendMotor = 0;
+    }
+    if(motorCommand == MOVE_180)
+    {
+      appendMotor = 2;
+    }
+    randomInt = String(currentWalls.frontWall) + String(currentWalls.rightWall) + String(currentWalls.leftWall) + String(appendMotor);
+    if (client.connected()) {
+          sendData(  randomInt );  
+        //sendData("0112"  );  
+    } else {
+        Serial.println("Not connected, attempting to reconnect");
+        if (client.connect(serverIP, port)) {
+            Serial.println("Reconnected to server");
+        }
+    }
+}
+
+void wifiSetup(){
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.println("Connecting to WiFi...");
+    }
+    Serial.println("Connected to WiFi");
+
+    if (client.connect(serverIP, port)) {
+        Serial.println("Connected to server");
+    } else {
+        Serial.println("Failed to connect to server");
+    }
+}
